@@ -1,0 +1,121 @@
+---
+title: "Untitled"
+output: html_document
+date: "2023-01-01"
+---
+## Variables
+EFG_O: Effective Field Goal Percentage Shot
+EFG_D: Effective Field Goal Percentage Allowed
+TOR: Turnover Percentage Allowed (Turnover Rate)
+TORD: Turnover Percentage Committed (Steal Rate)
+ORB: Offensive Rebound Rate
+DRB: Offensive Rebound Rate Allowed
+FTR : Free Throw Rate (How often the given team shoots Free Throws)
+FTRD: Free Throw Rate Allowed
+2P_O: Two-Point Shooting Percentage
+2P_D: Two-Point Shooting Percentage Allowed
+3P_O: Three-Point Shooting Percentage
+3P_D: Three-Point Shooting Percentage Allowed
+ADJ_T: Adjusted Tempo (An estimate of the tempo (possessions per 40 minutes) a team would have against the team that wants to play at an average Division I tempo)
+WAB: Wins Above Bubble (The bubble refers to the cut off between making the NCAA March Madness Tournament and not making it)
+
+https://www.modb.pro/db/451190
+
+```{r}
+library(tidyverse)
+library(finalfit)
+library(ggsci)
+library(ggpubr)
+library(factoextra)
+library(tidymodels)
+library(janitor)
+library(skimr)
+library(modelr)
+library(GGally)
+library(kableExtra) # make nice looking results when we knit
+library(vip)        # variable importance
+library(fastshap)   # shapley values for variable importance 
+library(MASS)
+library(tree)
+library(factoextra)
+```
+
+```{r}
+ds <- read.csv('cbb.csv')
+```
+
+
+首先我想研究关于UNC这些年表现情况的情况，以及是什么因素影响了球队的表现。首先看下面这张图，所有红色的点就是UNC的数据。横轴是防守效率，即每百回合对手的得分，这个数据越小说明球队防守越好；而纵轴是进攻效率，即每百回合自己球队的得分，数据越大说明进攻越好。从这里我们可以看出来UNC的进攻效率和防守效率在所有球队中都是几乎最好的，因此我想研究球队具体是在哪方面表现得出色，以及在什么方面可以提升。
+
+```{r}
+pdf("Performance.jpg")
+ggplot(ds,aes(ADJDE,ADJOE)) +
+  geom_point() +
+  geom_point(data = subset(ds, ds$TEAM == "North Carolina"),
+             color = "red",
+             size = 3) +
+  theme_classic()
+dev.off()
+```
+
+```{r}
+summary(ds[which(ds$TEAM=='North Carolina'),c('ADJOE', 'ADJDE', 'WAB', 'EFG_O', 'EFG_D', 'TOR', 'TORD', 'DRB','ORB', 'FTR')])
+```
+```{r}
+summary(ds[which(ds$POSTSEASON=="Champions"),c('ADJOE', 'ADJDE', 'WAB', 'EFG_O', 'EFG_D', 'TOR', 'TORD', 'DRB','ORB', 'FTR')])
+```
+
+```{r}
+ds1 <- filter(ds, ds$TEAM=="North Carolina")
+ds1
+```
+
+```{r}
+summary(ds[which(ds$YEAR==2014),c('ADJOE', 'ADJDE', 'WAB', 'EFG_O', 'EFG_D', 'TOR', 'TORD', 'DRB','ORB', 'FTR')])
+```
+
+
+```{r}
+m_adjoe <- lm(ADJOE~WAB+EFG_O+EFG_D+TOR+TORD+DRB+ORB+FTR, data=ds)
+summary(m_adjoe)
+```
+
+```{r}
+pdf("Relative.jpg")
+df_adjoe <- data.frame(coefficients=c('WAB', 'EFG_O', 'EFG_D', 'TOR', 'TORD', 'DRB','ORB', 'FTR'), value=c(0.643662, 0.852157, 0.469380, -0.857523, -0.498525, 0.198763, 0.389387, 0.041582))
+
+df_adjoe$coefficients <- factor(df_adjoe$coefficients, levels=df_adjoe$coefficients)
+
+a<- ggplot(df_adjoe, aes(x=coefficients, y=value))+
+  geom_bar(stat='identity', width=.5, fill="tomato3")+
+  theme(axis.text.x = element_text(angle=65, vjust=0.6))+
+  geom_text(aes(label=round(value,3)), 
+            position = position_dodge2(width = 0.9, preserve = 'single'),
+            vjust = -0.2, hjust = 0.5)+
+  labs(title="Relevant Factors of Adjusted Offensive Efficiency", 
+          caption="Source: cbb")
+
+df_adjde <- data.frame(coefficients=c('WAB', 'X2P_D', 'X3P_D', 'DRB', 'ORB','TORD', 'ADJ_T'), value=c(-0.383978,0.798217,0.518325,-0.423676,0.071006,-0.801261,0.094749))
+
+df_adjde$coefficients <- factor(df_adjde$coefficients, levels=df_adjde$coefficients)
+
+b<- ggplot(df_adjde, aes(x=coefficients, y=value))+
+  geom_bar(stat='identity', width=.5, fill="tomato3")+
+  theme(axis.text.x = element_text(angle=65, vjust=0.6))+
+  geom_text(aes(label=round(value,3)), 
+            position = position_dodge2(width = 0.9, preserve = 'single'),
+            vjust = -0.2, hjust = 0.5)+
+  labs(title="Relevant Factors of Adjusted Defensive Efficiency", 
+          caption="Source: cbb")
+
+grid.arrange(a, b, ncol=2)
+dev.off()
+```
+
+
+
+
+
+
+
+

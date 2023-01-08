@@ -1,0 +1,416 @@
+---
+title: "NCAA analysis"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      warning = FALSE,
+                      message = FALSE)
+```
+
+## load packages
+
+```{r}
+library(tidyverse)
+library(finalfit)
+library(ggsci)
+library(ggpubr)
+library(factoextra)
+library(tidymodels)
+library(janitor)
+library(skimr)
+library(modelr)
+library(GGally)
+library(kableExtra) # make nice looking results when we knit
+library(vip)        # variable importance
+library(fastshap)   # shapley values for variable importance 
+library(MASS)
+library(tree)
+library(factoextra)
+```
+
+```{r}
+ds = read.csv("cbb.csv")
+skim(ds)
+```
+
+## Descriptive analysis
+
+Top 10 teams by wins in different year.
+```{r}
+
+top_10 = ds %>% 
+  group_by(YEAR, TEAM) %>% 
+  mutate(win_rate = 100*W/G) %>% 
+  ungroup(TEAM) %>% 
+  slice_max(win_rate, n = 10, with_ties = F) 
+
+top_10_plot = function(year){
+  top_10 %>% 
+  filter(YEAR == year) %>% 
+  ggplot() + 
+  geom_bar(aes(reorder(TEAM, -win_rate), win_rate,fill = TEAM),
+           stat = "identity",
+           show.legend = F) +
+  geom_text(aes(x= TEAM, y = win_rate -3, 
+                label = paste0(round_tidy(win_rate,2),"%")),
+            size = 3)+
+  scale_y_continuous(limits = c(0, 100),
+                     expand = c(0, 0)) +
+  scale_fill_npg()+
+  labs(x= "Teams", 
+       y ="Wins",
+       title = paste0("Top 10 teams in ", year)) +
+  theme_classic() +
+  theme(axis.text.x  = element_text(angle = 90, vjust = 0.5))
+}
+
+for (i in 2013:2019) {
+  f = top_10_plot(i)
+  print(f)
+}
+
+```
+
+Offensive efficiency distribution and defensive efficiency distribution.
+
+```{r}
+ggplot(ds) +
+  geom_histogram(aes(ADJOE),
+                 fill = "lightblue",
+                 color = "white") +
+  labs(x= "Offensive efficiency", 
+       y ="Count",
+       title = "Adjusted offensive efficiency distribution") +
+  theme_classic() 
+
+ggplot(ds) +
+  geom_histogram(aes(ADJDE),
+                 fill = "lightblue",
+                 color = "white") +
+  labs(x= "Defensive efficiency", 
+       y ="Count",
+       title = "Adjusted defensive efficiency distribution") +
+  theme_classic() 
+  
+```
+
+
+Offensive efficiency distribution vs defensive efficiency distribution.
+
+```{r}
+ggplot(ds,aes(ADJDE,ADJOE)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  geom_point(data = subset(ds, ds$TEAM == "North Carolina"),
+             color = "red",
+             size = 3) +
+  theme_classic()
+  
+```
+
+
+## Creat clusters
+聚类分析，将NCAA球队分组成为由类似的对象组成多个类的一种统计方法。
+```{r}
+
+cluster_data = ds %>% 
+  dplyr::select(-c(TEAM,CONF,POSTSEASON,SEED, YEAR))
+
+# visually choose number of clusters (Elbow Plot)
+fviz_nbclust(cluster_data, kmeans, method="wss") #K-means聚类算法,选择5为因子个数
+
+set.seed(1234)
+clusters5 <- kmeans(cluster_data, 3, iter.max = 200, nstart = 25)  #可以看一下每个cluster的size
+print(clusters5)
+
+# visualize clusters
+
+fviz_cluster(clusters5,cluster_data,ellipse.type="norm",geom="point") 
+
+# explore clusters
+cluster <- as.factor(clusters5$cluster)
+
+#determine which variables are driving the cluster creation
+
+tree.clusters=tree(cluster~., cluster_data)
+summary(tree.clusters)
+plot(tree.clusters)
+text(tree.clusters,pretty=0)
+tree.clusters
+
+```
+
+
+```{r}
+#clusters number 5个组别所包含的球队个数
+ggplot(ds,aes(cluster))+
+  geom_bar()
+
+#different clusters WAB distribution  不同组别WAB分布
+ggplot(ds,aes(x=WAB))+
+  geom_histogram(binwidth=2)+
+  facet_wrap(~clusters5$cluster) + 
+  theme(axis.text.x=element_text(angle=45, hjust=1))
+
+ggplot(ds,aes(x=FTRD))+ #不同组别FTRD分布
+  geom_histogram(binwidth=2)+
+  facet_wrap(~clusters5$cluster) + 
+  theme(axis.text.x=element_text(angle=45, hjust=1))
+
+ggplot(ds,aes(x=EFG_O))+
+  geom_histogram(binwidth=2)+
+  facet_wrap(~clusters5$cluster) + 
+  theme(axis.text.x=element_text(angle=45, hjust=1))
+
+ggplot(ds,aes(x=EFG_D))+
+  geom_histogram(binwidth=2)+
+  facet_wrap(~clusters5$cluster) + 
+  theme(axis.text.x=element_text(angle=45, hjust=1))
+
+ggplot(ds,aes(x=W))+
+  geom_histogram(binwidth=2)+
+  facet_wrap(~clusters5$cluster) + 
+  theme(axis.text.x=element_text(angle=45, hjust=1))
+
+ggplot(ds,aes(x=ADJOE))+
+  geom_histogram(binwidth=2)+
+  facet_wrap(~clusters5$cluster) + 
+  theme(axis.text.x=element_text(angle=45, hjust=1))
+
+ggplot(ds,aes(x=ADJDE))+
+  geom_histogram(binwidth=2)+
+  facet_wrap(~clusters5$cluster) + 
+  theme(axis.text.x=element_text(angle=45, hjust=1))
+
+```
+
+## Prediction model
+
+Choose WIN_RATE as the outcome variable. 探讨胜率的影响因素，且构建三种模型，用RMSE作为模型好坏的标准。
+```{r}
+
+model_data = ds %>% 
+  dplyr::select(-c(TEAM,CONF, SEED,YEAR)) %>% 
+  mutate(win_rate = W/G)
+
+
+# Set the random number stream using `set.seed()` so that the results can be 
+# reproduced later. 
+set.seed(123)
+# Save the split information for an 70/30 split of the data
+hpsplit <- initial_split(model_data, prop = 0.70) #7：3划分训练集、测试集
+train <- training(hpsplit) 
+test  <-  testing(hpsplit)
+
+kfold_splits <- vfold_cv(train, v=5)
+
+```
+
+### Recipe 
+```{r}
+model_rec <-  #构建模型因变量~自变量
+  recipe(win_rate~ ADJOE + ADJDE + BARTHAG + EFG_O + EFG_D + 
+    TOR + TORD + ORB + DRB + FTR + FTRD + X2P_O + X2P_D + ADJ_T, data = train) %>% 
+  step_impute_mean(all_numeric_predictors()) %>%
+  step_impute_mode(all_nominal_predictors())
+
+```
+### Linear Regression
+
+```{r}
+
+lm_model <- linear_reg() %>% 
+            set_engine('lm') %>% # adds lm implementation of linear regression
+            set_mode('regression')
+
+lm_wflow <-workflow() %>%
+  add_recipe(model_rec) %>%
+  add_model(lm_model)
+
+lm_fit <- lm_wflow %>% 
+  fit(train)
+
+
+lm_fit %>%   #胜率的影响因素重要性排序
+  pull_workflow_fit() %>%
+  vip() 
+
+#model performance
+bind_cols(predict(lm_fit,test),test) %>%  #多元回归模型在测试集的RMSE
+ yardstick :: rmse(truth = win_rate, estimate = .pred)
+
+```
+
+### Random Forest Tuning
+用随机森林构建模型
+```{r}
+rf_model <- rand_forest(trees=tune(), min_n=tune()) %>%
+  set_engine("ranger",importance="permutation") %>%
+  set_mode("regression")
+
+rf_wflow <-workflow() %>%
+  add_recipe(model_rec) %>%
+  add_model(rf_model)
+
+rf_grid <- grid_regular(trees(c(25,250)), min_n(c(5,10)), levels = 4)
+
+doParallel::registerDoParallel()
+rf_grid_search <-
+  tune_grid(
+    rf_wflow,
+    resamples = kfold_splits,
+    grid = rf_grid)
+```
+
+```{r}
+rf_grid_search %>%  collect_metrics()
+
+rf_grid_search %>% #模型迭代过程中最佳参数与RMSE趋势图
+  collect_metrics() %>%
+  ggplot(aes(min_n, mean, color = .metric)) +
+  geom_errorbar(aes(
+    ymin = mean - std_err,
+    ymax = mean + std_err),
+  alpha = 0.5) +
+  geom_line(size = 1.5) +
+  facet_wrap(~.metric, scales = "free", nrow = 2) +
+  scale_x_log10() +
+  theme(legend.position = "none")
+
+
+rf_grid_search %>%#模型迭代过程中最佳参数与RMSE趋势图
+  collect_metrics() %>%
+  ggplot(aes(trees, mean, color = .metric)) +
+  geom_errorbar(aes(
+    ymin = mean - std_err,
+    ymax = mean + std_err
+  ),
+  alpha = 0.5
+  ) +
+  geom_line(size = 1.5) +
+  facet_wrap(~.metric, scales = "free", nrow = 2) +
+  scale_x_log10() +
+  theme(legend.position = "none")
+
+lowest_rf_rmse <- rf_grid_search %>%
+  select_best("rmse")
+
+rf_final <- finalize_workflow(
+  rf_wflow, lowest_rf_rmse) %>% 
+  fit(train)
+
+
+rf_final  %>%   #胜率的影响因素重要性排序
+  pull_workflow_fit() %>%
+  vip() 
+
+
+bind_cols(predict(rf_final,test),test) %>%  #随机森林模型在测试集的RMSE
+ yardstick::rmse(truth = win_rate, estimate = .pred)
+
+```
+
+### XGBoost
+XGBoost构建模型
+```{r}
+xgb_model <- boost_tree(trees=tune(), 
+                        learn_rate = tune(),
+                        tree_depth = tune()) %>%
+  set_engine("xgboost",
+             importance="permutation") %>%
+  set_mode("regression")
+
+
+xgb_wflow <-workflow() %>%
+  add_recipe(model_rec) %>%
+  add_model(xgb_model)
+
+
+xgb_search_res <- xgb_wflow %>% 
+  tune_bayes(
+    resamples = kfold_splits,
+    # Generate five at semi-random to start
+    initial = 5,
+    iter = 50, 
+    # How to measure performance?
+    # metrics = metric_set(rmse, rsq),
+    control = control_bayes(no_improve = 5, verbose = TRUE)
+  )
+
+ xgb_search_res %>%  collect_metrics() %>% 
+  filter(.metric == "rmse")
+```
+
+```{r}
+## XGB Tuning 
+xgb_search_res %>% #与RF类似， XgBoost迭代寻找最佳参数与RMSE过程
+  collect_metrics() %>%
+  ggplot(aes(learn_rate, mean, color = .metric)) +
+  geom_errorbar(aes(
+    ymin = mean - std_err,
+    ymax = mean + std_err),
+  alpha = 0.5
+  ) +
+  geom_line(size = 1.5) +
+  facet_wrap(~.metric, scales = "free", nrow = 2) +
+  scale_x_log10() +
+  theme(legend.position = "none")
+
+
+xgb_search_res %>%
+  collect_metrics() %>%
+  ggplot(aes(trees, mean, color = .metric)) +
+  geom_errorbar(aes(
+    ymin = mean - std_err,
+    ymax = mean + std_err),
+  alpha = 0.5) +
+  geom_line(size = 1.5) +
+  facet_wrap(~.metric, scales = "free", nrow = 2) +
+  scale_x_log10() +
+  theme(legend.position = "none")
+```
+
+```{r}
+#final XGBoost fit  
+lowest_xgb_rmse <- xgb_search_res %>%
+  select_best("rmse")
+
+xgb_final <- finalize_workflow(
+  xgb_wflow, lowest_xgb_rmse
+) %>% 
+  fit(train)
+
+xgb_final %>% #XGBoost模型变量重要性排序 
+  pull_workflow_fit() %>%
+ vip()
+
+bind_cols(predict(xgb_final,test),test) %>%#XGBoost模型测试集RMSE
+  yardstick:: rmse(truth = win_rate, estimate = .pred)
+```
+
+结论：3种模型RMSE相差很小，但综合来说多元回归模型RMSE最小，模型最佳。
+
+
+```{r}
+ds1 <- filter(ds, ds$TEAM=="North Carolina")
+ds1$win_rate = ds1$W/ds1$G
+ds1
+```
+
+```{r}
+modddd = lm(win_rate~ ADJOE + ADJDE + BARTHAG + EFG_O + EFG_D + 
+    TOR + TORD + ORB + DRB + FTR + FTRD + X2P_O + X2P_D + ADJ_T, data = model_data)
+summary(modddd)
+```
+
+```{r}
+aa=predict(modddd, newdata = ds1)
+aa
+```
+
+```{r}
+(ds1$win_rate-aa)/ds1$win_rate
+```
+
